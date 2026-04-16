@@ -1,0 +1,57 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default",
+      "description": "Base configure preset for the sigcon repository scaffold",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/desktop/build/default"
+    },
+    {
+      "name": "desktop-debug",
+      "displayName": "Desktop Debug",
+      "description": "Configure the Qt desktop application in Debug mode",
+      "inherits": "default",
+      "binaryDir": "${sourceDir}/desktop/build/desktop-debug",
+      "cacheVariables": {
+        "SIGCON_BUILD_DESKTOP": "ON",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_PREFIX_PATH": "$env{QTDIR}",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "desktop-release",
+      "displayName": "Desktop Release",
+      "description": "Configure the Qt desktop application in Release mode",
+      "inherits": "default",
+      "binaryDir": "${sourceDir}/desktop/build/desktop-release",
+      "cacheVariables": {
+        "SIGCON_BUILD_DESKTOP": "ON",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_PREFIX_PATH": "$env{QTDIR}",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default"
+    },
+    {
+      "name": "desktop-debug",
+      "configurePreset": "desktop-debug"
+    },
+    {
+      "name": "desktop-release",
+      "configurePreset": "desktop-release"
+    }
+  ]
+}

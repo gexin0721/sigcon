@@ -1,0 +1,48 @@
+openapi: 3.0.3
+info:
+  title: sigcon device api
+  version: 0.1.0
+  description: Initial draft for the ESP32-S3 HTTP interface.
+paths:
+  /api/v1/status:
+    get:
+      summary: Get current controller status
+      responses:
+        '200':
+          description: Status payload
+  /api/v1/config:
+    get:
+      summary: Get current configuration
+      responses:
+        '200':
+          description: Configuration payload
+  /api/v1/config/timing:
+    put:
+      summary: Update timing configuration
+      responses:
+        '200':
+          description: Configuration updated
+  /api/v1/control/mode:
+    post:
+      summary: Change controller mode
+      responses:
+        '200':
+          description: Mode updated
+  /api/v1/control/phase:
+    post:
+      summary: Change active phase manually
+      responses:
+        '200':
+          description: Phase updated
+  /api/v1/events:
+    get:
+      summary: List recent events
+      responses:
+        '200':
+          description: Event list
+  /api/v1/health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Health information

@@ -1,0 +1,63 @@
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.user
+*.userprefs
+*.suo
+*.vcxproj.user
+
+# Build outputs
+build/
+out/
+dist/
+bin/
+obj/
+cmake-build-*/
+
+# CMake
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+
+# Qt
+*.pro.user
+*.qbs.user
+*.qmlc
+*.jsc
+*.moc
+*.obj
+*.pdb
+
+# ESP-IDF
+sdkconfig
+sdkconfig.old
+managed_components/
+
+# Logs and runtime data
+runtime/logs/*
+runtime/data/*
+!runtime/logs/.gitkeep
+!runtime/data/.gitkeep
+
+# Test and coverage artifacts
+coverage/
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+
+# Archives
+*.zip
+*.7z
+*.tar
+*.gz
+
+# Local env
+.env
+.env.*
