@@ -1,0 +1,5 @@
+[2026-04-25 14:37:04.149][INFO   ][CaseCreate][sample.cpp:10] create check
+[2026-04-25 14:37:04.150][INFO   ][CaseLevel][sample.cpp:21] info should be kept
+[2026-04-25 14:37:04.151][WARNING][OrderSvc][main.cpp:42] format check message
+[2026-04-25 14:37:04.153][ERROR  ][BatchSvc][c.cpp:100] batch message 1
+[2026-04-25 14:37:04.154][FATAL  ][BatchSvc][c.cpp:101] batch message 2
