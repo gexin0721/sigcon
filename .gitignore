@@ -61,3 +61,4 @@ coverage/
 # Local env
 .env
 .env.*
+*.log
