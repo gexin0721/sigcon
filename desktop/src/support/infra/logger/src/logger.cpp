@@ -1,250 +1,237 @@
-#include "logger.h"
+#include "../include/logger.h"
 
-#include <QDebug>
-#include <QDir>
+#include <iostream>
+#include <sstream>
+#include <iomanip>
+#include <chrono>
+#include <ctime>
+#include <cstdlib>   // abort()
 
-// ============================================================
-//  可调参数
-// ============================================================
-static constexpr qint64 kDefaultMaxBytes = 50LL * 1024 * 1024; // 50 MB / 文件
+// ═════════════════════════════════════════════════════════════════════════════
+//  运行模式：静态成员定义 + init / instance
+// ═════════════════════════════════════════════════════════════════════════════
 
-// ============================================================
-//  运行模式静态成员
-// ============================================================
-#ifndef LOGGER_TEST_MODE
-Logger *Logger::s_instance = nullptr;
-QMutex  Logger::s_initMutex;
-#endif
+#ifndef LOG_TEST_MODE
 
-// ============================================================
-//  构造 / 析构
-// ============================================================
-Logger::Logger(const QString &logDir)
-    : m_logDir(logDir)
-    , m_curDate(QDate::currentDate())
-    , m_maxBytes(kDefaultMaxBytes)
+std::unique_ptr<Logger> Logger::s_instance;
+std::mutex              Logger::s_initMutex;
+
+void Logger::init(const std::string& prefix,
+                  const std::string& id,
+                  const std::string& fileLocation)
 {
-    QDir().mkpath(logDir);
+    std::lock_guard<std::mutex> lock(s_initMutex);
+    if (s_instance) return;   // 已初始化，忽略重复调用
 
-#ifdef LOGGER_TEST_MODE
-    // 测试模式：文件名 = 时间戳（精确到毫秒，避免多实例冲突）
-    QString ts   = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
-    QString path = QString("%1/test_%2.log").arg(logDir, ts);
-    openFile(path);
-#else
-    // 运行模式：按日期命名
-    openFile(buildRunFilePath());
-#endif
+    s_instance.reset(new Logger());
+    s_instance->m_prefix       = prefix;
+    s_instance->m_id           = id;
+    s_instance->m_fileLocation = fileLocation;
+    s_instance->m_level        = LogLevel::DEBUG;
+    s_instance->openFile();
 }
+
+Logger& Logger::instance()
+{
+    if (!s_instance) {
+        throw std::runtime_error(
+            "[Logger] 单例尚未初始化，请先调用 Logger::init()");
+    }
+    return *s_instance;
+}
+
+#endif // !LOG_TEST_MODE
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  测试模式：构造函数
+// ═════════════════════════════════════════════════════════════════════════════
+
+#ifdef LOG_TEST_MODE
+
+Logger::Logger(const std::string& prefix,
+               const std::string& id,
+               const std::string& fileLocation)
+    : m_prefix(prefix)
+    , m_id(id)
+    , m_fileLocation(fileLocation)
+    , m_level(LogLevel::DEBUG)
+{
+    openFile();
+}
+
+#endif // LOG_TEST_MODE
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  析构
+// ═════════════════════════════════════════════════════════════════════════════
 
 Logger::~Logger()
 {
-    QMutexLocker lk(&m_mutex);
-    if (m_file.isOpen()) {
-        m_stream.flush();
+    if (m_file.is_open()) {
+        m_file.flush();
         m_file.close();
     }
 }
 
-// ============================================================
-//  等级控制
-// ============================================================
-void Logger::setLogLevel(LogLevel level)
+// ═════════════════════════════════════════════════════════════════════════════
+//  公共接口
+// ═════════════════════════════════════════════════════════════════════════════
+
+void Logger::setLevel(LogLevel level)
 {
-    QMutexLocker lk(&m_mutex);
-    m_logLevel = level;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_level = level;
 }
 
-LogLevel Logger::logLevel() const
+void Logger::debug(const std::string& msg) { log(LogLevel::DEBUG, msg); }
+void Logger::info (const std::string& msg) { log(LogLevel::INFO,  msg); }
+void Logger::warn (const std::string& msg) { log(LogLevel::WARN,  msg); }
+void Logger::error(const std::string& msg) { log(LogLevel::ERROR, msg); }
+
+void Logger::fatal(const std::string& msg)
 {
-    // 读操作，简单处理（若需严格安全可加锁）
-    return m_logLevel;
+    log(LogLevel::FATAL, msg);
+    std::abort();   // 不可恢复，直接终止
 }
 
-// ============================================================
-//  手动刷盘
-// ============================================================
-void Logger::flush()
-{
-    QMutexLocker lk(&m_mutex);
-    m_stream.flush();
-}
-
-// ============================================================
+// ═════════════════════════════════════════════════════════════════════════════
 //  核心写入
-// ============================================================
-void Logger::log(LogLevel       level,
-                 const QString &businessId,
-                 const QString &file,
-                 int            line,
-                 const QString &message)
+// ═════════════════════════════════════════════════════════════════════════════
+
+void Logger::log(LogLevel level, const std::string& msg)
 {
-    // 等级过滤（无锁快速判断）
-    if (level < m_logLevel) return;
+    std::lock_guard<std::mutex> lock(m_mutex);
 
-    QMutexLocker lk(&m_mutex);
+    // 等级过滤
+    if (level < m_level) return;
 
-#ifndef LOGGER_TEST_MODE
-    // 运行模式：检查是否需要滚动文件
-    checkRolling();
+    // 运行模式：检查是否需要换日滚动
+#ifndef LOG_TEST_MODE
+    rollIfNewDay();
 #endif
 
-    // ---- 格式化一行 -----------------------------------------
-    //  [2025-01-15 14:23:05.123][INFO   ][OrderSvc][main.cpp:42] 下单成功
-    QString timeStr = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz");
-    QString shortFile = QFileInfo(file).fileName();   // 只保留文件名，不含路径
-    QString tag = levelToTag(level);
+    // 拼装日志行
+    // 格式：【时间】【ID】【文件位置】【级别】 消息
+    std::ostringstream oss;
+    oss << "【" << nowDatetime()       << "】"
+        << "【" << m_id               << "】"
+        << "【" << m_fileLocation     << "】"
+        << "【" << levelToStr(level)  << "】 "
+        << msg;
 
-    QString entry = QString("[%1][%2][%3][%4:%5] %6")
-                        .arg(timeStr)
-                        .arg(tag)
-                        .arg(businessId)
-                        .arg(shortFile)
-                        .arg(line)
-                        .arg(message);
+    const std::string line = oss.str();
 
-    // ---- 写文件 ---------------------------------------------
-    if (m_file.isOpen()) {
-        m_stream << entry << '\n';
-
-#ifdef LOGGER_TEST_MODE
-        // 测试模式：每次立即刷盘，确保崩溃时日志不丢
-        m_stream.flush();
-#else
-        // 运行模式：ERROR / FATAL 强制刷盘，其余缓冲（性能优先）
-        if (level >= LogLevel::ERR) {
-            m_stream.flush();
-        }
-#endif
+    // 写文件
+    if (m_file.is_open()) {
+        m_file << line << '\n';
+        m_file.flush();
     }
 
-    // ---- 写控制台 -------------------------------------------
-    writeToConsole(level, entry);
+    // 同步打印到终端（stdout）
+    std::cout << line << '\n';
 }
 
-// ============================================================
-//  私有：打开文件
-// ============================================================
-void Logger::openFile(const QString &filePath)
+// ═════════════════════════════════════════════════════════════════════════════
+//  文件管理
+// ═════════════════════════════════════════════════════════════════════════════
+
+void Logger::openFile()
 {
-    if (m_file.isOpen()) {
-        m_stream.flush();
+    if (m_file.is_open()) {
+        m_file.flush();
         m_file.close();
     }
-    m_file.setFileName(filePath);
-    if (!m_file.open(QIODevice::Append | QIODevice::Text)) {
-        qCritical() << "[Logger] 无法打开日志文件：" << filePath;
-        return;
-    }
-    m_stream.setDevice(&m_file);
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    m_stream.setEncoding(QStringConverter::Utf8);
+    std::string filename;
+
+#ifdef LOG_TEST_MODE
+    // 测试模式：前缀 + 时间戳，每次构造生成独立文件
+    filename = m_prefix + "_" + nowTimestamp() + ".log";
 #else
-    m_stream.setCodec("UTF-8");
+    // 运行模式：前缀 + 日期，以追加方式写入当天文件
+    m_currentDate = nowDate();
+    filename = m_prefix + "_" + m_currentDate + ".log";
 #endif
+
+    // 追加模式打开，保留已有内容（运行模式同一天重启不覆盖）
+    m_file.open(filename, std::ios::app);
+    if (!m_file.is_open()) {
+        std::cerr << "[Logger] 无法打开日志文件: " << filename << '\n';
+    }
 }
 
-// ============================================================
-//  私有：运行模式文件滚动检查
-//    优先级 1：日期变了 → 新建当天文件，序号归零
-//    优先级 2：当前文件超过 maxBytes → 同日内追加序号
-// ============================================================
-void Logger::checkRolling()
+void Logger::rollIfNewDay()
 {
-    QDate today = QDate::currentDate();
-    if (today != m_curDate) {
-        m_curDate   = today;
-        m_fileIndex = 0;
-        openFile(buildRunFilePath());
-        return;
-    }
-    if (m_file.isOpen() && m_file.size() >= m_maxBytes) {
-        ++m_fileIndex;
-        openFile(buildRunFilePath());
+    // 调用前必须已持有 m_mutex
+    const std::string today = nowDate();
+    if (today != m_currentDate) {
+        // 日期已变，切换到新文件
+        openFile();
     }
 }
 
-// ============================================================
-//  私有：运行模式文件路径
-//    无序号：log_2025-01-15.log
-//    有序号：log_2025-01-15_1.log、log_2025-01-15_2.log …
-// ============================================================
-QString Logger::buildRunFilePath() const
-{
-    QString dateStr = m_curDate.toString("yyyy-MM-dd");
-    if (m_fileIndex == 0) {
-        return QString("%1/log_%2.log").arg(m_logDir, dateStr);
-    }
-    return QString("%1/log_%2_%3.log").arg(m_logDir, dateStr).arg(m_fileIndex);
-}
+// ═════════════════════════════════════════════════════════════════════════════
+//  工具函数
+// ═════════════════════════════════════════════════════════════════════════════
 
-// ============================================================
-//  私有：等级标签（固定宽度，便于对齐）
-// ============================================================
-QString Logger::levelToTag(LogLevel level) const
+std::string Logger::levelToStr(LogLevel level) const
 {
     switch (level) {
-    case LogLevel::DEBUG:   return "DEBUG  ";
-    case LogLevel::INFO:    return "INFO   ";
-    case LogLevel::WARNING: return "WARNING";
-    case LogLevel::ERR:     return "ERROR  ";
-    case LogLevel::FATAL:   return "FATAL  ";
-    default:                return "UNKNOWN";
+        case LogLevel::DEBUG: return "DEBUG";
+        case LogLevel::INFO:  return "INFO ";
+        case LogLevel::WARN:  return "WARN ";
+        case LogLevel::ERROR: return "ERROR";
+        case LogLevel::FATAL: return "FATAL";
+        default:              return "?????";
     }
 }
 
-// ============================================================
-//  私有：控制台输出（利用 Qt 的日志系统，便于 IDE 跳转）
-// ============================================================
-void Logger::writeToConsole(LogLevel level, const QString &entry) const
+std::string Logger::nowDatetime() const
 {
-    switch (level) {
-    case LogLevel::DEBUG:
-        qDebug().noquote()    << entry; break;
-    case LogLevel::INFO:
-        qInfo().noquote()     << entry; break;
-    case LogLevel::WARNING:
-        qWarning().noquote()  << entry; break;
-    case LogLevel::ERR:
-        qCritical().noquote() << entry; break;
-    case LogLevel::FATAL:
-        qCritical().noquote() << entry; break;
-    default:
-        qDebug().noquote()    << entry; break;
-    }
+    using namespace std::chrono;
+
+    const auto now = system_clock::now();
+    const auto ms  = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+    const std::time_t t = system_clock::to_time_t(now);
+
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S")
+        << '.'
+        << std::setw(3) << std::setfill('0') << ms.count();
+    return oss.str();
 }
 
-// ============================================================
-//  运行模式：单例接口
-// ============================================================
-#ifndef LOGGER_TEST_MODE
-
-bool Logger::init(const QString &logDir)
+std::string Logger::nowDate() const
 {
-    QMutexLocker lk(&s_initMutex);
-    if (s_instance) {
-        qWarning() << "[Logger] init() 已被调用过，忽略本次调用";
-        return false;
-    }
-    s_instance = new Logger(logDir);
-    return true;
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y%m%d");
+    return oss.str();
 }
 
-Logger *Logger::instance()
+std::string Logger::nowTimestamp() const
 {
-    // 正常运行期间 s_instance 已初始化，无需加锁（读指针是原子的）
-    Q_ASSERT_X(s_instance != nullptr,
-               "Logger::instance()",
-               "请先调用 Logger::init() 完成初始化");
-    return s_instance;
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y%m%d_%H%M%S");
+    return oss.str();
 }
-
-void Logger::destroy()
-{
-    QMutexLocker lk(&s_initMutex);
-    delete s_instance;
-    s_instance = nullptr;
-}
-
-#endif // LOGGER_TEST_MODE
