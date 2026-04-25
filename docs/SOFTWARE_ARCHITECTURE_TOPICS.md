@@ -1,9 +1,11 @@
 # `sigcon` 软件架构设计与落地规范
 
-> 版本整合说明：本文在原始架构规范基础上，整合了以下三条落地补充：
+> 版本整合说明：本文在原始架构规范基础上，整合了以下五条落地补充：
 > 1. L3 的定位澄清（最小软件单元，非上帝对象）
 > 2. L2 装配的懒加载策略（控制 L3 装配规模）
 > 3. 全工程统一模块格式规范（src/include/test/docs/example）
+> 4. 双轨线程模型（共享任务池 + 专属驻守工人注册表）
+> 5. **配置模块重设计**：取消 L2::Config，改为 L0 设置入口 + L3 直属配置窗口
 
 ---
 
@@ -32,11 +34,11 @@
 - 业务模块的 `setConfig(...)` 只负责接收业务配置快照并刷新当前业务行为参数，例如阈值、策略、设备参数、通信超时、算法开关；禁止在该接口中直接操作 UI、直接接管调度职责或越级修改其他模块。
 - 调度层必须统一暴露 `upConfig(...)` 接口，专门供上一层调用。上一层只能通过 `upConfig(...)` 把配置意图下发给下一层调度器，再由该调度器继续拆分并调用直属模块的 `setConfig(...)`，禁止绕过调度链直接跨层灌配置。
 - `upConfig(...)` 的职责是"接收上一层配置意图、拆分作用范围、转发给直属子对象"，它不是配置持久化入口，不是业务计算入口，也不是全局扫描入口。
-- 全局配置变更（如换语言、换字体、改主题）属于低频操作，本质上是全局性参数而非模块级参数，必须全局生效，不存在局部豁免。配置专线所带来的多层转发成本是合理的架构代价，任何试图绕过配置专线以"减少摩擦"为由的替代方案，最终都需要等量的回调或信号处理，且会破坏配置路径的统一性，得不偿失。
+- 全局配置变更（如换语言、换字体、改主题）属于低频操作，本质上是全局性参数而非模块级参数，必须全局生效，不存在局部豁免。
 
 ### 1.4 异常归属与健康归属
 
-- 必须明确一个核心：**下一层的异常由上一层负责处理，下一层的健康状态由上一层负责管理。**
+- **下一层的异常由上一层负责处理，下一层的健康状态由上一层负责管理。**
 - 下层模块只负责三件事：执行、暴露自身状态、在必要时上报异常或健康变化；下层模块禁止反向承担上层的全局治理职责。
 - 任意一层都只能管理自己的直属下一层，禁止跨层托管。例如 L2 只管理直属 L1 与直属业务实例，L3 只管理直属 L2 与应用级资源。
 - 健康管理必须采用"父层持有、事件驱动、按需刷新"的模式，禁止把全局健康治理做成一个由 L3 常驻线程不断扫描全工程对象的方案。
@@ -50,7 +52,7 @@
 
 ### L0（最小逻辑单元）
 
-负责最基础、单次、结果唯一的调度行为。其核心特征是**拥有独立 UI 窗口与完整的交互闭环**，典型场景包括确认弹窗、进度弹窗、单次授权弹窗等。L0 与 `support/utils` 的本质区别在于：utils 是无状态纯函数，无生命周期概念；L0 有窗口状态（打开/关闭/交互结果），有完整的显示—交互—结果回传生命周期。L0 不允许创建多线程，不负责更高层的窗口装配。
+负责最基础、单次、结果唯一的调度行为。其核心特征是**拥有独立 UI 窗口与完整的交互闭环**，典型场景包括确认弹窗、进度弹窗、单次授权弹窗、**以及设置入口触发动作**等。L0 与 `support/utils` 的本质区别在于：utils 是无状态纯函数，无生命周期概念；L0 有窗口状态（打开/关闭/交互结果），有完整的显示—交互—结果回传生命周期。L0 不允许创建多线程，不负责更高层的窗口装配。
 
 ### L1（最小功能单元）
 
@@ -58,7 +60,9 @@
 
 ### L2（最小业务单元）
 
-模块级/业务域级调度器。负责多步骤流程编排与 L1 的切换。负责业务断点时的重试或流程回滚。L2 必须向上暴露 `upConfig(...)` 供 L3 调用，并负责管理直属 L1、直属业务模块的异常与健康状态。L2 默认不知道 L3 的具体实现；当 L2 需要向上通知 L3 时，必须使用装配阶段注入的回调函数或标准通知接口，禁止为了通知而反向持有 L3。L2 内必须存在独立的 `Config` 模块，但该模块只负责配置项设置、参数校验、配置持久化以及按约定通知 L3 配置变更，禁止直接越级修改具体 UI 控件。
+模块级/业务域级调度器。负责多步骤流程编排与 L1 的切换，以及业务断点时的重试或流程回滚。L2 必须向上暴露 `upConfig(...)` 供 L3 调用，并负责管理直属 L1、直属业务模块的异常与健康状态。
+
+**L2 对 L3 的感知归零**：L2 不包含任何 Config 模块，不主动通知 L3，不持有任何指向 L3 的通道。这是本规范与早期版本的核心差异，原因见第 2.1 节。
 
 ### L3（最小软件单元）
 
@@ -66,40 +70,131 @@
 
 L3 的固定职责为：
 - 应用全生命周期管理（启动、关闭、崩溃兜底）
-- 全系统**唯一**的线程与进程创建权、销毁权持有者
+- 全系统**唯一**的线程与进程创建权、销毁权持有者，管辖共享任务池与专属驻守工人注册表两套线程基础设施
 - 向下装配直属 L2，并在 L2 间完成信号槽连接
-- 接收 L2::Config 的配置变更通知后，将配置通过 `upConfig(...)` 逐层下发
+- **直接持有 `ConfigWindow`，作为应用级配置界面的唯一归属者**
+- 接收 `ConfigWindow` 的配置变更通知后，将配置通过 `upConfig(...)` 逐层下发
 - 作为全局致命异常的最后兜底网，不下钻扫描 L1/L0/业务对象
 
-**L3 装配规模控制——懒加载策略**：L3 只在用户真正触发某个业务域时，才装配对应的 L2 实例并建立其信号槽连接；未被触发的业务域不参与装配，其代码路径在运行期不存在。这使得 L3 的实际装配规模始终与用户实际使用路径对齐，而非与工程中业务域的总数对齐，从根本上避免 L3 装配代码随项目规模线性膨胀。
+**L3 装配规模控制——懒加载策略**：L3 只在用户真正触发某个业务域时，才装配对应的 L2 实例并建立其信号槽连接；未被触发的业务域不参与装配，其代码路径在运行期不存在。`ConfigWindow` 同样遵循懒加载策略，首次唤起时才实例化。
 
-### 2.1 配置流转专线
+---
 
-为了避免配置职责扩散，所有全局配置必须走如下唯一路径：
+### 2.1 配置模块重设计：为什么取消 L2::Config
+
+> **写给后来者**：如果你看到这里，想把配置相关逻辑重新移回 L2，请先读完这一节。
+
+早期版本在 L2 内设置了 `Config` 模块，职责是"接收配置请求、校验、持久化、通知 L3"。这个设计存在一个根本性的结构矛盾：
+
+**L2 的核心约束是"不知道 L3 的存在"，但 L2::Config 的最后一步必须通知 L3。** 无论通过回调、信号槽还是接口指针实现，其本质都是 L2 在感知 L3——这不是写法问题，而是职责归属问题。把"决定拉起配置界面"这个应用级决策放在 L2，只会让 L2 永远无法与 L3 解耦，和没有设计约束时没有任何区别。
+
+新方案的核心洞察：**在用户视角，"配置"从来就是一个独立的操作入口，不附属于任何业务域。** 用户点击设置按钮，这是一个独立的、最小的交互动作——它天然就是一个 L0 单元。L0 只做一件事：告诉上层"用户想进配置"。配置界面由谁管理、怎么拉起，L0 完全不知道，也不需要知道。
+
+### 2.2 L0 设置入口：`SettingsEntryAction`
+
+这是配置重设计引入的唯一新构件，职责边界极窄：
+
+```cpp
+// scheduler/l0_action/settings_entry/include/SettingsEntryAction.h
+
+class SettingsEntryAction : public QObject {
+    Q_OBJECT
+public:
+    explicit SettingsEntryAction(QObject* parent = nullptr);
+
+    // L3 装配阶段调用，将此 L0 嵌入主界面某个触发点（按钮、菜单项等）
+    QWidget* triggerWidget();
+
+signals:
+    // 唯一对外信号：用户请求打开配置界面
+    // L3 在装配阶段连接此信号，L0 本身不知道谁在监听
+    void userRequestedSettings();
+
+private slots:
+    void onTriggerClicked();
+};
+```
+
+`SettingsEntryAction` 的铁律：
+- 只负责捕获用户的"打开配置"意图并发出信号
+- 不持有任何配置数据，不知道配置界面是什么、由谁创建
+- 不知道 L3、L2 或任何调度层的存在
+- 符合 L0 定义：拥有一个最小交互闭环（点击→信号），有生命周期，无业务逻辑
+
+### 2.3 L3 对配置的直接管理
+
+配置界面（`ConfigWindow`）是应用级资源，由 L3 直接持有。这是正确的归属——配置覆盖全软件，没有理由让任何一个业务域（L2）来托管它。
+
+```cpp
+// scheduler/l3_app/main_entry.cpp（伪代码示意）
+
+class L3_App : public QObject {
+    Q_OBJECT
+
+    ConfigWindow* configWindow_ = nullptr;       // 懒加载，首次唤起时才实例化
+    SettingsEntryAction* settingsEntry_ = nullptr;
+
+public:
+    void bootstrap() {
+        settingsEntry_ = new SettingsEntryAction(this);
+
+        // L3 装配阶段：连接 L0 的唯一信号
+        // L0 不知道这里发生了什么，L3 自主决策
+        connect(settingsEntry_, &SettingsEntryAction::userRequestedSettings,
+                this, &L3_App::onUserRequestedSettings);
+
+        // ...其余 L2 的懒加载装配
+    }
+
+private slots:
+    void onUserRequestedSettings() {
+        if (!configWindow_) {
+            configWindow_ = new ConfigWindow(this);
+            connect(configWindow_, &ConfigWindow::configChanged,
+                    this, &L3_App::onConfigChanged);
+        }
+        configWindow_->show();
+        configWindow_->raise();
+    }
+
+    void onConfigChanged(const AppConfig& newConfig) {
+        // 配置下发专线：L3 → 各 L2::upConfig() → L1::upConfig() → setConfig()
+        l2_network_->upConfig(newConfig.network);
+        l2_device_->upConfig(newConfig.device);
+        // ...
+    }
+};
+```
+
+配置持久化由 `ConfigWindow` 通过 `support/infra/storage` 防腐层完成，读写入口依然收敛，不扩散到各业务模块。
+
+### 2.4 配置流转专线
 
 ```
-L2::Config -> L3 -> L2::upConfig(...) -> L1::upConfig(...) -> Business/UI::setConfig(...)
+用户点击设置按钮
+    → SettingsEntryAction::userRequestedSettings()     [L0 信号]
+    → L3::onUserRequestedSettings()                    [L3 装配连接]
+    → ConfigWindow::show()                             [L3 持有，懒加载]
+    → 用户修改配置并确认
+    → ConfigWindow::configChanged()                    [L3 持有窗口的信号]
+    → L3::onConfigChanged()
+    → L2::upConfig() → L1::upConfig() → Business/UI::setConfig()
 ```
 
-该链路中各层职责固定如下：
+与早期规范相比，**L3 之后的下发链路完全不变**。变化只发生在"谁触发 L3 开始下发"——从原来的 L2::Config 主动通知 L3，改为 L3 自己持有配置窗口、自己感知变更、自己决定下发。
 
-1. **L2::Config**：负责接收配置请求、校验参数、写入配置文件、通知 L3。
-2. **L3**：负责解释"哪些直属调度域需要同步刷新"，并调用对应 L2 的 `upConfig(...)` 开始逐层下发。
-3. **L2/L1::upConfig(...)**：负责拆分配置作用范围，只向直属子对象继续分发，不得跳层广播。
-4. **Business/UI::setConfig(...)**：负责把新配置应用到当前业务行为或当前界面显示，不得反向承担调度决策。
-
-### 2.2 上一层托管下一层的责任链
+### 2.5 上一层托管下一层的责任链
 
 为了避免低层越权和高层失控，异常与健康管理必须遵守如下固定责任链：
 
 1. **L1 管** L0、UI 页面内局部对象、页面级业务适配对象。
-2. **L2 管**直属 L1、直属业务模块、模块级流程状态。
-3. **L3 管**直属 L2、线程池、进程资源、应用级生命周期。
+2. **L2 管** 直属 L1、直属业务模块、模块级流程状态。
+3. **L3 管** 直属 L2、线程池、驻守工人、进程资源、应用级生命周期，以及 `ConfigWindow`。
 
 补充强制约束：
 - 下层可以上报异常和健康变化，但不拥有全局解释权。
 - 上层必须保存直属子对象的健康视图与异常处置策略，但不能替代更上层做越级决策。
-- 禁止出现"L3 统一扫描全局所有对象健康"的实现，因为这会把树状管理退化为全局轮询，带来时间复杂度和空间占用的持续浪费。
+- 禁止出现"L3 统一扫描全局所有对象健康"的实现。
 
 ---
 
@@ -112,8 +207,8 @@ Project_Root/
 ├── assets/                    # 【静态资源域】图片、图标、样式表、多语言翻译包
 ├── Config/                    # 【配置文件域】默认配置、用户配置、配置模板、配置版本迁移文件
 ├── data/                      # 【运行数据域】缓存、导出结果、日志快照、运行期持久化数据
-├── docs/                      # 【文档域】架构说明、API协议、错误码对照表
-├── lib/                       # 【第三方库域】(绝对隔离，禁止业务/UI直接引用)
+├── docs/                      # 【文档域】架构说明、API 协议、错误码对照表
+├── lib/                       # 【第三方库域】(绝对隔离，禁止业务/UI 直接引用)
 │   ├── spdlog/
 │   ├── nlohmann_json/
 │   └── ...
@@ -134,13 +229,16 @@ Project_Root/
 │   │
 │   ├── scheduler/             # 模块三：【调度层】(唯一允许同时 import UI 和 Business 的地方)
 │   │   ├── l0_action/         # L0 动作编排：含独立 UI 窗口的最小交互单元
+│   │   │   └── settings_entry/    # ← 设置入口 L0（SettingsEntryAction）
 │   │   ├── l1_page/           # L1 页面调度：组装 UI Window + L0 动作单元
 │   │   ├── l2_domain/         # L2 业务调度：组装 L1 + Business（处理重试/中断）
-│   │   │   └── config/        # L2 Config 模块：仅负责设置、校验、持久化、通知 L3
+│   │   │                      # ※ 无 config/ 子目录，L2 不感知 L3，不持有配置职责
 │   │   └── l3_app/            # L3 软件装配：全局控制台（最小软件单元）
-│   │       ├── thread_pool/   # 【线程管控】创建权与销毁权独占区；对外暴露 AppThreadPool
-│   │       ├── app_context/   # 全局运行时上下文
-│   │       └── main_entry.cpp # 启动与兜底；懒加载装配 L2；全局 try-catch 收口
+│   │       ├── thread_pool/       # 【共享任务池】AppThreadPool；对外暴露 submit()
+│   │       ├── worker_registry/   # 【专属驻守工人注册表】AppWorkerRegistry；对外暴露 WorkerHandle
+│   │       ├── config_window/     # ← 【应用级配置窗口】ConfigWindow；由 L3 直接持有与管理
+│   │       ├── app_context/       # 全局运行时上下文
+│   │       └── main_entry.cpp     # 启动与兜底；懒加载装配 L2；全局 try-catch 收口
 │   │
 │   └── support/               # 模块四：【支撑域】(基石：被上层单向依赖，禁止反向 import 上层)
 │       ├── core/
@@ -149,7 +247,7 @@ Project_Root/
 │       │   └── shared_state.h # 极少量的、严格受控的全局状态
 │       ├── infra/             # 基础设施区（第三方库的"防腐层"）
 │       │   ├── logger/        # 封装日志库
-│       │   ├── storage/       # 封装本地缓存/数据库
+│       │   ├── storage/       # 封装本地缓存/数据库（配置持久化由此完成）
 │       │   └── ipc_network/   # 封装多进程/网络底层通信
 │       └── utils/             # 纯函数工具箱；无状态，无生命周期
 ```
@@ -157,7 +255,7 @@ Project_Root/
 补充目录约束：
 - `Config/` 只允许存放配置相关文件，禁止混入缓存、导出结果、临时数据。
 - `data/` 只允许存放运行数据，禁止把默认配置、静态配置模板和配置定义文件放入 `data/`。
-- 配置文件的读取入口、写入入口、版本迁移入口必须由 L2 的 `Config` 模块统一管理，禁止多个业务模块各自直连多个配置文件。
+- 配置文件的读取入口、写入入口、版本迁移入口由 L3 直属的 `ConfigWindow` 通过 `support/infra/storage` 统一管理，禁止多个业务模块各自直连多个配置文件。
 - `support/utils/` 与 `scheduler/l0_action/` 的边界：utils 是无状态纯函数工具；L0 是拥有独立 UI 窗口和完整交互生命周期的最小调度单元。两者不可混用。
 
 ---
@@ -185,7 +283,7 @@ Project_Root/
 - 业务模块 / UI 模块的 `test/`：自测本模块的单一功能，mock 外部依赖，不引入上层对象。
 - L1 的 `test/`：集成测试页面调度逻辑，引入直属 UI 模块和 L0 的 `include/`，验证编排是否正确。
 - L2 的 `test/`：集成测试业务域流程，引入直属 L1 和业务模块的 `include/`，验证重试/回滚逻辑。
-- L3 的 `test/`：端到端冒烟测试，验证全局装配、线程池生命周期、致命异常兜底路径。
+- L3 的 `test/`：端到端冒烟测试，验证全局装配、线程池生命周期、驻守工人注册表生命周期、`ConfigWindow` 懒加载、致命异常兜底路径。
 
 **上层对下层的 `test/` 实现细节永远不可见**，也不应关心——上层只依赖下层的 `include/`，下层自己保证合约履行。
 
@@ -233,13 +331,13 @@ Project_Root/
 
 ## 6. 多线程与多进程并发模型
 
-### 6.1 线程权力分层：创建权与使用权分离
+### 6.1 双轨线程模型：共享任务池 与 专属驻守工人
 
-L3 是全系统**唯一拥有线程创建权和销毁权**的地方，但这不意味着 L3 垄断所有异步能力——子单元（L0/L1/L2）拥有线程**使用权**，即通过标准接口向线程池提交任务。
+全系统线程分为性质截然不同的两类，L3 在 `l3_app/` 内分别持有两套基础设施，统一拥有创建权与销毁权。
 
-这一设计与操作系统的资源管理模型一致：进程只能向内核申请资源，不能绕过内核自造内核对象。
+#### 轨道一：共享任务池（AppThreadPool）
 
-**标准实现**：
+适合**无状态短任务**：一次性计算、文件读写、数据库查询等。线程数量固定，任务随机调度，调用方不关心由哪个线程执行。
 
 ```cpp
 // scheduler/l3_app/thread_pool/AppThreadPool.h
@@ -248,18 +346,72 @@ public:
     // 子单元唯一合法的异步入口；支持 TaskID 注册，便于 L3 感知任务生命周期
     static void submit(std::function<void()> task, TaskID id);
 
-    // 仅供 L3 内部调用：初始化、销毁线程池
+    // 仅供 L3 内部调用
     static void init(int maxThreads);
     static void shutdown();
 
 private:
-    QThreadPool pool_;  // Qt 线程池实例，对外不可见
+    QThreadPool pool_;
 };
 ```
 
-**铁律补充**：禁止在 `l3_app/` 之外的任何地方直接调用 `QThreadPool::globalInstance()` 或 `QtConcurrent::run()`。Code Review 阶段可通过关键字搜索机械检查，将"文档约定"转化为"可验证约束"。
+#### 轨道二：专属驻守工人注册表（AppWorkerRegistry）
 
-### 6.2 依赖反转与契约通信
+适合**有状态长驻任务**：网络连接维护、设备心跳监听、串口轮询、IPC 守护等需要独立事件循环持续运行的场景。每个 Worker 是一个带独立事件循环的 `QThread`，有名字，有归属域。
+
+```cpp
+// scheduler/l3_app/worker_registry/AppWorkerRegistry.h
+class AppWorkerRegistry {
+public:
+    // 仅供 L3 内部调用：在懒加载装配阶段创建 Worker
+    static WorkerHandle registerWorker(const QString& name, AppWorkerBase* worker);
+
+    // 仅供 L3 内部调用：在业务域卸载时销毁 Worker
+    static void shutdown(const QString& name);
+
+private:
+    QMap<QString, AppWorkerBase*> workers_;
+};
+```
+
+`WorkerHandle` 是 L2 持有的唯一使用凭证，其所有方法内部强制走 `QMetaObject::invokeMethod(..., Qt::QueuedConnection)`，将调用自动序列化到 Worker 自身的线程事件循环中，调用方无需关心线程切换。
+
+#### 两轨线程的归属模型
+
+**L3 创建并持有生命周期，L2 持有使用权。** 这与操作系统的资源管理模型一致：进程向内核申请线程，内核持有资源，进程拿到句柄使用。
+
+```cpp
+// L3 懒加载装配某业务域时的伪代码示意
+void L3::activateNetworkDomain() {
+    // 1. 创建专属驻守工人（L3 的权力）
+    auto handle = AppWorkerRegistry::registerWorker("network_guard", new NetworkGuardWorker());
+
+    // 2. 创建 L2，WorkerHandle 通过构造函数注入（依赖注入，不是 L2 自己拿）
+    auto l2 = new L2_NetworkDomain(handle);
+
+    // 3. 连接信号槽（L3 装配阶段）
+    connect(handle.worker(), &NetworkGuardWorker::statusChanged,
+            l2, &L2_NetworkDomain::onNetworkStatus);
+}
+```
+
+L2 通过 `WorkerHandle` 只能向 Worker 提交指令或连接其信号，**不能**通过 Handle 销毁、重建或迁移线程。
+
+#### 双轨线程与懒加载的协同
+
+| 时机 | 共享任务池 | 专属驻守工人 |
+|---|---|---|
+| 启动时 | 预创建固定数量线程 | 不创建任何 Worker |
+| 用户触发业务域 | 不变 | L3 为该域创建 Worker，注入对应 L2 |
+| 业务域被关闭/卸载 | 不变 | L3 调用 `shutdown(name)`，销毁 Worker |
+
+L3 的实际线程数量始终与用户正在使用的业务域数量对齐，而非工程中所有业务域的总数。
+
+### 6.2 线程创建权的铁律
+
+禁止在 `l3_app/` 之外的任何地方直接调用 `QThreadPool::globalInstance()`、`QtConcurrent::run()`、`std::thread`、`QThread` 构造函数。Code Review 阶段可通过关键字搜索机械检查，将"文档约定"转化为"可验证约束"。
+
+### 6.3 依赖反转与契约通信
 
 业务层（包括独立的网络线程或 IPC 通信进程）绝对禁止直接调用调度层或 UI。数据返回必须通过**标准契约**：即回调注入（`std::function`）或发布/订阅（信号与槽机制）。业务模块只负责"无脑"触发回调，不关心数据去向。
 
@@ -267,13 +419,13 @@ private:
 - `L2 <-> L2` 之间的通信，优先采用 Qt 的信号槽机制与事件系统完成，**信号连接必须在 L3 装配阶段完成，L2 代码文件内禁止出现另一个 L2 的头文件 include**，避免平级横向依赖悄然形成。
 - 如果遇到跨进程、跨模块边界更重、或 Qt 信号槽不适合覆盖的特殊场景，最低可以退到 Redis 这类外部消息中介，但该方案默认不作为第一选择。
 
-### 6.3 统一主线程事件序列化
+### 6.4 统一主线程事件序列化
 
 - **绝对禁止非主线程直接修改 UI。**
 - 当后台子进程/子线程通过回调或信号返回数据时，调度层必须将该行为封装为"事件"，压入**主线程事件队列（Event Loop）**。
 - 所有并行到达的任务，在主线程中都会被序列化排队执行，从根本上消灭并发资源争抢。
 
-### 6.4 基于 TaskID 的精确路由
+### 6.5 基于 TaskID 的精确路由
 
 为了将后台进程的结果准确送达对应的 L1 页面：
 
@@ -294,10 +446,10 @@ UI 绝不能 `#include` 业务；底层代码绝不能包含任何第三方库�
 低层调度器（L1/L0）绝不能持有或私自创建高层调度器（L3/L2）；所有依赖必须自上而下通过构造函数注入。
 
 **铁律三：线程权力分层**
-全项目线程的**创建与销毁**只能发生在 `L3` 的专属目录内。L0/L1/L2 如需异步能力，必须通过 `AppThreadPool::submit()` 提交任务，严禁直接调用 `std::thread`、`QThread`、`QThreadPool::globalInstance()` 或 `QtConcurrent::run()`。
+全项目线程的**创建与销毁**只能发生在 `L3` 的专属目录内，涵盖共享任务池（`AppThreadPool`）与专属驻守工人注册表（`AppWorkerRegistry`）两套基础设施。L0/L1/L2 如需短任务异步能力，必须通过 `AppThreadPool::submit()` 提交；如需驻守线程，必须在 L3 装配阶段通过 `WorkerHandle` 注入，严禁自行构造 `std::thread`、`QThread`、`QThreadPool::globalInstance()` 或 `QtConcurrent::run()`。
 
 **铁律四：配置专线**
-任何全局配置变更都必须严格经过 `L2::Config -> L3 -> L2/L1::upConfig(...) -> Business/UI::setConfig(...)` 这条链路。禁止业务层直接改 UI，禁止 UI 绕过 `setConfig` 私自同步全局配置，禁止 L2 `Config` 模块直接操作具体控件。
+用户触发配置的唯一入口是 `SettingsEntryAction`（L0），配置界面的唯一归属者是 L3 直属的 `ConfigWindow`。配置变更的下发必须严格经过 `L3 → L2/L1::upConfig(...) → Business/UI::setConfig(...)` 这条链路。禁止业务层直接改 UI，禁止任何层绕过 `setConfig` 私自同步全局配置，禁止 L2 承担任何配置感知或通知职责。
 
 **铁律五：逐层托管**
 下一层的异常由上一层负责处理，下一层的健康由上一层负责管理。禁止 L3 通过全局扫描线程统一轮询所有层级对象，禁止任何层越级接管不直属的对象。
@@ -308,12 +460,16 @@ UI 绝不能 `#include` 业务；底层代码绝不能包含任何第三方库�
 
 | 场景 | 正确做法 | 禁止做法 |
 |---|---|---|
-| 换主题/换字体 | L2::Config 通知 L3，L3 通过 upConfig 逐层下发 | L2 直接调用 UI 控件接口 |
-| 后台任务异步执行 | AppThreadPool::submit() | std::thread / QThread 直接创建 |
+| 用户发起配置 | 点击 `SettingsEntryAction`（L0），L3 监听信号并拉起 `ConfigWindow` | L2 持有配置窗口；L2 主动通知 L3 |
+| 配置变更下发 | L3::onConfigChanged → 各 L2::upConfig() → L1::upConfig() → setConfig() | 任何层级绕过 L3 直接跨层灌配置 |
+| 配置持久化 | `ConfigWindow` 通过 `support/infra/storage` 写入 | 业务模块各自直连配置文件 |
+| 换主题/换字体 | `ConfigWindow` 通知 L3，L3 通过 upConfig 逐层下发 | L2 直接调用 UI 控件接口 |
+| 后台短任务异步执行 | `AppThreadPool::submit()` | `std::thread` / `QThread` 直接创建 |
+| 后台长驻有状态任务 | L3 装配阶段 `AppWorkerRegistry::registerWorker()`，WorkerHandle 注入 L2 | L2 自行创建 `QThread` 或持有裸线程指针 |
 | L2 通知 L3 | 装配阶段注入的回调 / Qt 信号槽 | L2 持有 L3 指针 |
 | L2 间通信 | L3 装配阶段连接的信号槽 | L2 的 .cpp 中 include 另一个 L2 头文件 |
-| 模块外部调用 | 只引用目标模块 include/ 下的头文件 | 直接引用 src/ 下的实现文件 |
+| 模块外部调用 | 只引用目标模块 `include/` 下的头文件 | 直接引用 `src/` 下的实现文件 |
 | L3 感知深层健康状态 | L2 汇总后向 L3 上报 | L3 自行下钻扫描 L1/L0/业务对象 |
-| 新业务域装配 | 用户触发时懒加载，L3 按需建立信号槽 | 启动时统一装配所有 L2 |
+| 新业务域装配 | 用户触发时懒加载，L3 按需建立信号槽与 Worker | 启动时统一装配所有 L2 和 Worker |
 | 预期内业务失败（设备未找到等） | Result 模式返回，不抛异常 | 抛出异常让上层 catch |
-| 预期外崩溃（断网、文件损坏等） | 抛出派生自 AppBaseException 的异常 | 在底层自行处理并弹窗 |
+| 预期外崩溃（断网、文件损坏等） | 抛出派生自 `AppBaseException` 的异常 | 在底层自行处理并弹窗 |

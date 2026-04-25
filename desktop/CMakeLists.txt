@@ -8,6 +8,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 
+# 说明：
+# 1) IXWebSocket 统一放置在 desktop/lib/IXWebSocket，避免污染系统环境。
+# 2) 通过 add_subdirectory 引入本地第三方库，确保构建可复现。
+# 3) 如果目录不存在，提前给出明确错误，提示先执行 scripts/desktop_init.sh。
+set(IXWEBSOCKET_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib/IXWebSocket)
+if(NOT EXISTS ${IXWEBSOCKET_DIR}/CMakeLists.txt)
+    message(FATAL_ERROR "IXWebSocket 未找到，请先执行 scripts/desktop_init.sh 初始化依赖。")
+endif()
+add_subdirectory(${IXWEBSOCKET_DIR} ${CMAKE_CURRENT_BINARY_DIR}/ixwebsocket)
+
 # 思路：
 # 1. 优先兼容当前机器可用的 Qt 版本，避免写死 Qt6 导致 Qt5 环境无法构建。
 # 2. 保持自动生成工程的结构，减少对现有文件组织的扰动。
@@ -32,7 +42,8 @@ endif()
 
 target_include_directories(desktop PRIVATE src)
 
-target_link_libraries(desktop PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+# 说明：链接 Qt Widgets 与 IXWebSocket 静态/动态库目标。
+target_link_libraries(desktop PRIVATE Qt${QT_VERSION_MAJOR}::Widgets ixwebsocket)
 
 set_target_properties(desktop PROPERTIES
     MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
