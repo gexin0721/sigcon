@@ -5,8 +5,8 @@ project(desktop VERSION 0.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Sql)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Sql)
 
 # 说明：
 # 1) IXWebSocket 统一放置在 desktop/lib/IXWebSocket，避免污染系统环境。
@@ -17,6 +17,16 @@ if(NOT EXISTS ${IXWEBSOCKET_DIR}/CMakeLists.txt)
     message(FATAL_ERROR "IXWebSocket 未找到，请先执行 scripts/desktop_init.sh 初始化依赖。")
 endif()
 add_subdirectory(${IXWEBSOCKET_DIR} ${CMAKE_CURRENT_BINARY_DIR}/ixwebsocket)
+
+# 说明：
+# 1) QxOrm 统一放置在 desktop/lib/QxOrm，与现有第三方依赖管理方式保持一致。
+# 2) 通过 add_subdirectory 引入本地源码，避免依赖系统全局安装版本导致行为不一致。
+# 3) 如果目录不存在，提前给出明确错误，提示先执行 scripts/desktop_init.sh。
+set(QXORM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib/QxOrm)
+if(NOT EXISTS ${QXORM_DIR}/CMakeLists.txt)
+    message(FATAL_ERROR "QxOrm 未找到，请先执行 scripts/desktop_init.sh 初始化依赖。")
+endif()
+add_subdirectory(${QXORM_DIR} ${CMAKE_CURRENT_BINARY_DIR}/qxorm)
 
 # 思路：
 # 1. 优先兼容当前机器可用的 Qt 版本，避免写死 Qt6 导致 Qt5 环境无法构建。
@@ -42,8 +52,11 @@ endif()
 
 target_include_directories(desktop PRIVATE src)
 
-# 说明：链接 Qt Widgets 与 IXWebSocket 静态/动态库目标。
-target_link_libraries(desktop PRIVATE Qt${QT_VERSION_MAJOR}::Widgets ixwebsocket)
+# 说明：
+# 1) Qt${QT_VERSION_MAJOR}::Sql 为 QxOrm 的基础依赖（数据库驱动与 SQL 抽象接口）。
+# 2) QxOrm 目标名来自其官方 CMake 配置中的 add_library(QxOrm ...)。
+# 3) 保持依赖显式声明，避免通过传递依赖引起的链接行为差异。
+target_link_libraries(desktop PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Sql ixwebsocket QxOrm)
 
 set_target_properties(desktop PROPERTIES
     MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
