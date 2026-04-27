@@ -24,8 +24,16 @@ LIB_DIR="${REPO_ROOT}/desktop/lib"
 IXWS_DIR="${LIB_DIR}/IXWebSocket"
 IXWS_REPO_URL="https://github.com/machinezone/IXWebSocket.git"
 
+# =====  QxOrm =====
+# QxOrm 的目标目录与远程仓库地址。
+# 说明：
+# 1) QxOrm 属于 ORM 基础设施库，将与 IXWebSocket 一样统一放在 desktop/lib 下管理。
+# 2) 使用固定目录命名，便于 CMake 通过 add_subdirectory 精准定位第三方源码。
+QXORM_DIR="${LIB_DIR}/QxOrm"
+QXORM_REPO_URL="https://github.com/QxOrm/QxOrm.git"
+
 # 输出当前动作，便于排查脚本执行过程。
-echo "[desktop_init] 准备初始化 IXWebSocket 开发环境..."
+echo "[desktop_init] 准备初始化 desktop 第三方依赖环境（IXWebSocket + QxOrm）..."
 echo "[desktop_init] 仓库根目录: ${REPO_ROOT}"
 echo "[desktop_init] 依赖目录: ${LIB_DIR}"
 
@@ -33,17 +41,30 @@ echo "[desktop_init] 依赖目录: ${LIB_DIR}"
 mkdir -p "${LIB_DIR}"
 
 # 若 IXWebSocket 已存在，则直接跳过下载，保证脚本可重复执行。
+# 注意：这里不能再直接 exit，否则会导致后续 QxOrm 无法初始化。
 if [ -d "${IXWS_DIR}" ]; then
-    echo "[desktop_init] 检测到 ${IXWS_DIR} 已存在，跳过下载。"
-    exit 0
+    echo "[desktop_init] 检测到 ${IXWS_DIR} 已存在，跳过 IXWebSocket 下载。"
+else
+    # 如果目录不存在，则执行浅克隆以减少下载体积和时间。
+    echo "[desktop_init] 未检测到 IXWebSocket，开始下载..."
+    git clone --depth 1 "${IXWS_REPO_URL}" "${IXWS_DIR}"
+    # 下载完成后给出结果提示。
+    echo "[desktop_init] IXWebSocket 下载完成: ${IXWS_DIR}"
 fi
 
-# 如果目录不存在，则执行浅克隆以减少下载体积和时间。
-echo "[desktop_init] 未检测到 IXWebSocket，开始下载..."
-git clone --depth 1 "${IXWS_REPO_URL}" "${IXWS_DIR}"
+# 若 QxOrm 已存在，则直接跳过下载，保证脚本可重复执行。
+if [ -d "${QXORM_DIR}" ]; then
+    echo "[desktop_init] 检测到 ${QXORM_DIR} 已存在，跳过 QxOrm 下载。"
+else
+    # 如果目录不存在，则执行浅克隆以减少下载体积和时间。
+    echo "[desktop_init] 未检测到 QxOrm，开始下载..."
+    git clone --depth 1 "${QXORM_REPO_URL}" "${QXORM_DIR}"
+    # 下载完成后给出结果提示。
+    echo "[desktop_init] QxOrm 下载完成: ${QXORM_DIR}"
+fi
 
-# 下载完成后给出结果提示。
-echo "[desktop_init] IXWebSocket 下载完成: ${IXWS_DIR}"
+# 所有依赖检查结束后统一给出总结，便于 CI 或人工快速确认脚本执行结果。
+echo "[desktop_init] 依赖初始化完成。"
 
 
 # 
